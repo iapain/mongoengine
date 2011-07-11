@@ -1832,7 +1832,64 @@ class DocumentTest(unittest.TestCase):
         self.Person.objects.update_one(set__name='Test User', write_options=write_options)
         author = self.Person.objects.first()
         self.assertEquals(author.name, 'Test User')
+    
+    def test_embedded_update(self):
+        """
+        Test update on `EmbeddedDocumentField` fields
+        """
+        
+        class Page(EmbeddedDocument):
+            log_message = StringField(verbose_name="Log message", max_length=200,
+                                      required=True)
 
+        class Site(Document):
+            page = EmbeddedDocumentField(Page)
+            
+        
+        Site.drop_collection()
+        
+        site = Site(page=Page(log_message="Warning: Dummy message"))
+        site.save()
+        
+        # Query
+        site = Site.objects.first()
+        site.page.log_message = "Error: Dummy message"
+        site.save()
+        
+        
+        # Re-query
+        site = Site.objects.first()
+        
+        self.assertEqual(site.page.log_message, "Error: Dummy message")
+        
+    def test_embedded_db_field_update(self):
+        """
+        Test update on `EmbeddedDocumentField` fields when db_field is other
+        than default.
+        """
+        
+        class Page(EmbeddedDocument):
+            log_message = StringField(verbose_name="Log message",
+                                      db_field="page_log_message", max_length=200,
+                                      required=True)
+
+        class Site(Document):
+            page = EmbeddedDocumentField(Page)
+            
+        
+        Site.drop_collection()
+        
+        site = Site(page=Page(log_message="Warning: Dummy message"))
+        site.save()
+        site = Site.objects.first()
+        site.page.log_message = "Error: Dummy message"
+        site.save()
+        
+        # Re-query
+        site = Site.objects.first()
+        
+        self.assertEqual(site.page.log_message, "Error: Dummy message")
+        
 
 if __name__ == '__main__':
     unittest.main()
