@@ -1,5 +1,6 @@
 from queryset import QuerySet, QuerySetManager
 from queryset import DoesNotExist, MultipleObjectsReturned
+from queryset import DO_NOTHING
 
 import sys
 import pymongo
@@ -25,6 +26,12 @@ class BaseField(object):
     _index_with_types = True
     _geo_index = False
 
+    # These track each time a Field instance is created. Used to retain order.
+    # The auto_creation_counter is used for fields that MongoEngine implicitly
+    # creates, creation_counter is used for all user-specified fields.
+    creation_counter = 0
+    auto_creation_counter = -1
+
     def __init__(self, db_field=None, name=None, required=False, default=None, 
                  unique=False, unique_with=None, primary_key=False,
                  validation=None, choices=None):
@@ -41,6 +48,13 @@ class BaseField(object):
         self.primary_key = primary_key
         self.validation = validation
         self.choices = choices
+        # Adjust the appropriate creation counter, and save our local copy.
+        if self.db_field == '_id':
+            self.creation_counter = BaseField.auto_creation_counter
+            BaseField.auto_creation_counter -= 1
+        else:
+            self.creation_counter = BaseField.creation_counter
+            BaseField.creation_counter += 1
 
     def __get__(self, instance, owner):
         """Descriptor for retrieving a value from a field in a document. Do 
@@ -87,9 +101,9 @@ class BaseField(object):
     def _validate(self, value):
         # check choices
         if self.choices is not None:
-            if value not in self.choices:
-                raise ValidationError("Value must be one of %s."
-                    % unicode(self.choices))
+            option_keys = [option_key for option_key, option_value in self.choices]
+            if value not in option_keys:
+                raise ValidationError("Value must be one of %s." % unicode(option_keys))
 
         # check validation argument
         if self.validation is not None:
@@ -190,6 +204,10 @@ class DocumentMetaclass(type):
         new_class = super_new(cls, name, bases, attrs)
         for field in new_class._fields.values():
             field.owner_document = new_class
+            delete_rule = getattr(field, 'reverse_delete_rule', DO_NOTHING)
+            if delete_rule != DO_NOTHING:
+                field.document_type.register_delete_rule(new_class, field.name,
+                        delete_rule)
 
         module = attrs.get('__module__')
 
@@ -241,8 +259,8 @@ class TopLevelDocumentMetaclass(DocumentMetaclass):
 
                 # Propagate index options.
                 for key in ('index_background', 'index_drop_dups', 'index_opts'):
-                   if key in base._meta:
-                      base_meta[key] = base._meta[key]
+                    if key in base._meta:
+                        base_meta[key] = base._meta[key]
 
                 id_field = id_field or base._meta.get('id_field')
                 base_indexes += base._meta.get('indexes', [])
@@ -258,6 +276,7 @@ class TopLevelDocumentMetaclass(DocumentMetaclass):
             'index_drop_dups': False,
             'index_opts': {},
             'queryset_class': QuerySet,
+            'delete_rules': {},
         }
         meta.update(base_meta)
 
@@ -442,7 +461,7 @@ class BaseDocument(object):
                 self._meta.get('allow_inheritance', True) == False):
             data['_cls'] = self._class_name
             data['_types'] = self._superclasses.keys() + [self._class_name]
-        if data.has_key('_id') and not data['_id']:
+        if data.has_key('_id') and data['_id'] is None:
             del data['_id']
         return data
 
@@ -502,7 +521,9 @@ class BaseDocument(object):
 
 if sys.version_info < (2, 5):
     # Prior to Python 2.5, Exception was an old-style class
+    import types
     def subclass_exception(name, parents, unused):
+        import types
         return types.ClassType(name, parents, {})
 else:
     def subclass_exception(name, parents, module):

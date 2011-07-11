@@ -10,10 +10,17 @@ import copy
 import itertools
 
 __all__ = ['queryset_manager', 'Q', 'InvalidQueryError',
-           'InvalidCollectionError']
+           'InvalidCollectionError', 'DO_NOTHING', 'NULLIFY', 'CASCADE', 'DENY']
+
 
 # The maximum number of items to display in a QuerySet.__repr__
 REPR_OUTPUT_SIZE = 20
+
+# Delete rules
+DO_NOTHING = 0
+NULLIFY = 1
+CASCADE = 2
+DENY = 3
 
 
 class DoesNotExist(Exception):
@@ -78,7 +85,7 @@ class SimplificationVisitor(QNodeVisitor):
             # to a single field
             intersection = ops.intersection(query_ops)
             if intersection:
-                msg = 'Duplicate query contitions: '
+                msg = 'Duplicate query conditions: '
                 raise InvalidQueryError(msg + ', '.join(intersection))
 
             query_ops.update(ops)
@@ -179,7 +186,7 @@ class QueryCompilerVisitor(QNodeVisitor):
                     # once to a single field
                     intersection = current_ops.intersection(new_ops)
                     if intersection:
-                        msg = 'Duplicate query contitions: '
+                        msg = 'Duplicate query conditions: '
                         raise InvalidQueryError(msg + ', '.join(intersection))
 
                     # Right! We've got two non-overlapping dicts of operations!
@@ -268,6 +275,48 @@ class Q(QNode):
         return not bool(self.query)
 
 
+class QueryFieldList(object):
+    """Object that handles combinations of .only() and .exclude() calls"""
+    ONLY = True
+    EXCLUDE = False
+
+    def __init__(self, fields=[], direction=ONLY, always_include=[]):
+        self.direction = direction
+        self.fields = set(fields)
+        self.always_include = set(always_include)
+
+    def as_dict(self):
+        return dict((field, self.direction) for field in self.fields)
+
+    def __add__(self, f):
+        if not self.fields:
+            self.fields = f.fields
+            self.direction = f.direction
+        elif self.direction is self.ONLY and f.direction is self.ONLY:
+            self.fields = self.fields.intersection(f.fields)
+        elif self.direction is self.EXCLUDE and f.direction is self.EXCLUDE:
+            self.fields = self.fields.union(f.fields)
+        elif self.direction is self.ONLY and f.direction is self.EXCLUDE:
+            self.fields -= f.fields
+        elif self.direction is self.EXCLUDE and f.direction is self.ONLY:
+            self.direction = self.ONLY
+            self.fields = f.fields - self.fields
+
+        if self.always_include:
+            if self.direction is self.ONLY and self.fields:
+                self.fields = self.fields.union(self.always_include)
+            else:
+                self.fields -= self.always_include
+        return self
+
+    def reset(self):
+        self.fields = set([])
+        self.direction = self.ONLY
+
+    def __nonzero__(self):
+        return bool(self.fields)
+
+
 class QuerySet(object):
     """A set of results returned from a query. Wraps a MongoDB cursor,
     providing :class:`~mongoengine.Document` objects as the results.
@@ -281,15 +330,17 @@ class QuerySet(object):
         self._query_obj = Q()
         self._initial_query = {}
         self._where_clause = None
-        self._loaded_fields = []
+        self._loaded_fields = QueryFieldList()
         self._ordering = []
         self._snapshot = False
         self._timeout = True
+        self._class_check = True
 
         # If inheritance is allowed, only return instances and instances of
         # subclasses of the class being used
         if document._meta.get('allow_inheritance'):
             self._initial_query = {'_types': self._document._class_name}
+            self._loaded_fields = QueryFieldList(always_include=['_cls'])
         self._cursor_obj = None
         self._limit = None
         self._skip = None
@@ -298,7 +349,8 @@ class QuerySet(object):
     def _query(self):
         if self._mongo_query is None:
             self._mongo_query = self._query_obj.to_query(self._document)
-            self._mongo_query.update(self._initial_query)
+            if self._class_check:
+                self._mongo_query.update(self._initial_query)
         return self._mongo_query
 
     def ensure_index(self, key_or_list, drop_dups=False, background=False,
@@ -349,7 +401,7 @@ class QuerySet(object):
 
         return index_list
 
-    def __call__(self, q_obj=None, **query):
+    def __call__(self, q_obj=None, class_check=True, **query):
         """Filter the selected documents by calling the
         :class:`~mongoengine.queryset.QuerySet` with a query.
 
@@ -357,6 +409,8 @@ class QuerySet(object):
             the query; the :class:`~mongoengine.queryset.QuerySet` is filtered
             multiple times with different :class:`~mongoengine.queryset.Q`
             objects, only the last one will be used
+        :param class_check: If set to False bypass class name check when
+            querying collection
         :param query: Django-style query keyword arguments
         """
         #if q_obj:
@@ -367,6 +421,7 @@ class QuerySet(object):
         self._query_obj &= query
         self._mongo_query = None
         self._cursor_obj = None
+        self._class_check = class_check
         return self
 
     def filter(self, *q_objs, **query):
@@ -423,7 +478,7 @@ class QuerySet(object):
                 'timeout': self._timeout,
             }
             if self._loaded_fields:
-                cursor_args['fields'] = self._loaded_fields
+                cursor_args['fields'] = self._loaded_fields.as_dict()
             self._cursor_obj = self._collection.find(self._query, 
                                                      **cursor_args)
             # Apply where clauses to cursor
@@ -431,7 +486,9 @@ class QuerySet(object):
                 self._cursor_obj.where(self._where_clause)
 
             # apply default ordering
-            if self._document._meta['ordering']:
+            if self._ordering:
+                self._cursor_obj.sort(self._ordering)
+            elif self._document._meta['ordering']:
                 self.order_by(*self._document._meta['ordering'])
 
             if self._limit is not None:
@@ -820,19 +877,37 @@ class QuerySet(object):
 
         .. versionadded:: 0.3
         """
-        self._loaded_fields = []
-        for field in fields:
-            if '.' in field:
-                raise InvalidQueryError('Subfields cannot be used as '
-                                        'arguments to QuerySet.only')
-            # Translate field name
-            field = QuerySet._lookup_field(self._document, field)[-1].db_field
-            self._loaded_fields.append(field)
-
-        # _cls is needed for polymorphism
-        if self._document._meta.get('allow_inheritance'):
-            self._loaded_fields += ['_cls']
+        fields = self._fields_to_dbfields(fields)
+        self._loaded_fields += QueryFieldList(fields, direction=QueryFieldList.ONLY)
         return self
+
+
+    def exclude(self, *fields):
+        """Opposite to .only(), exclude some document's fields. ::
+
+            post = BlogPost.objects(...).exclude("comments")
+
+        :param fields: fields to exclude
+        """
+        fields = self._fields_to_dbfields(fields)
+        self._loaded_fields += QueryFieldList(fields, direction=QueryFieldList.EXCLUDE)
+        return self
+
+    def all_fields(self):
+        """Include all fields. Reset all previously calls of .only() and .exclude(). ::
+
+            post = BlogPost.objects(...).exclude("comments").only("title").all_fields()
+        """
+        self._loaded_fields = QueryFieldList(always_include=self._loaded_fields.always_include)
+        return self
+
+    def _fields_to_dbfields(self, fields):
+        """Translate fields paths to its db equivalents"""
+        ret = []
+        for field in fields:
+            field = ".".join(f.db_field for f in QuerySet._lookup_field(self._document, field.split('.')))
+            ret.append(field)
+        return ret
 
     def order_by(self, *keys):
         """Order the :class:`~mongoengine.queryset.QuerySet` by the keys. The
@@ -888,6 +963,28 @@ class QuerySet(object):
 
         :param safe: check if the operation succeeded before returning
         """
+        doc = self._document
+
+        # Check for DENY rules before actually deleting/nullifying any other
+        # references
+        for rule_entry in doc._meta['delete_rules']:
+            document_cls, field_name = rule_entry
+            rule = doc._meta['delete_rules'][rule_entry]
+            if rule == DENY and document_cls.objects(**{field_name + '__in': self}).count() > 0:
+                msg = u'Could not delete document (at least %s.%s refers to it)' % \
+                        (document_cls.__name__, field_name)
+                raise OperationError(msg)
+
+        for rule_entry in doc._meta['delete_rules']:
+            document_cls, field_name = rule_entry
+            rule = doc._meta['delete_rules'][rule_entry]
+            if rule == CASCADE:
+                document_cls.objects(**{field_name + '__in': self}).delete(safe=safe)
+            elif rule == NULLIFY:
+                document_cls.objects(**{field_name + '__in': self}).update(
+                        safe_update=safe,
+                        **{'unset__%s' % field_name: 1})
+
         self._collection.remove(self._query, safe=safe)
 
     @classmethod
@@ -923,8 +1020,7 @@ class QuerySet(object):
 
                 # Convert value to proper value
                 field = fields[-1]
-                if op in (None, 'set', 'unset', 'pop', 'push', 'pull',
-                          'addToSet'):
+                if op in (None, 'set', 'push', 'pull', 'addToSet'):
                     value = field.prepare_query_value(op, value)
                 elif op in ('pushAll', 'pullAll'):
                     value = [field.prepare_query_value(op, v) for v in value]

@@ -1,4 +1,5 @@
 from base import BaseField, ObjectIdField, ValidationError, get_document
+from queryset import DO_NOTHING
 from document import Document, EmbeddedDocument
 from connection import _get_db
 from operator import itemgetter
@@ -8,11 +9,10 @@ import pymongo
 import pymongo.dbref
 import pymongo.son
 import pymongo.binary
-import datetime
+import datetime, time
 import decimal
 import gridfs
 import warnings
-import types
 
 
 __all__ = ['StringField', 'IntField', 'FloatField', 'BooleanField',
@@ -150,6 +150,8 @@ class IntField(BaseField):
         if self.max_value is not None and value > self.max_value:
             raise ValidationError('Integer value is too large')
 
+    def prepare_query_value(self, op, value):
+        return int(value)
 
 class FloatField(BaseField):
     """An floating point number field.
@@ -172,6 +174,9 @@ class FloatField(BaseField):
 
         if self.max_value is not None and value > self.max_value:
             raise ValidationError('Float value is too large')
+
+    def prepare_query_value(self, op, value):
+        return float(value)
 
 class DecimalField(BaseField):
     """A fixed-point decimal number field.
@@ -227,6 +232,40 @@ class DateTimeField(BaseField):
     def validate(self, value):
         assert isinstance(value, datetime.datetime)
 
+    def prepare_query_value(self, op, value):
+        if value is None:
+            return value
+        if isinstance(value, datetime.datetime):
+            return value
+        if isinstance(value, datetime.date):
+            return datetime.datetime(value.year, value.month, value.day)
+
+        # Attempt to parse a datetime:
+        #value = smart_str(value)
+        # split usecs, because they are not recognized by strptime.
+        if '.' in value:
+            try:
+                value, usecs = value.split('.')
+                usecs = int(usecs)
+            except ValueError:
+                return None
+        else:
+            usecs = 0
+        kwargs = {'microsecond': usecs}
+        try: # Seconds are optional, so try converting seconds first.
+            return datetime.datetime(*time.strptime(value, '%Y-%m-%d %H:%M:%S')[:6],
+                                     **kwargs)
+
+        except ValueError:
+            try: # Try without seconds.
+                return datetime.datetime(*time.strptime(value, '%Y-%m-%d %H:%M')[:5],
+                                         **kwargs)
+            except ValueError: # Try without hour/minutes/seconds.
+                try:
+                    return datetime.datetime(*time.strptime(value, '%Y-%m-%d')[:3],
+                                             **kwargs)
+                except ValueError:
+                    return None
 
 class EmbeddedDocumentField(BaseField):
     """An embedded document field. Only valid values are subclasses of
@@ -417,12 +456,13 @@ class ReferenceField(BaseField):
     access (lazily).
     """
 
-    def __init__(self, document_type, **kwargs):
+    def __init__(self, document_type, reverse_delete_rule=DO_NOTHING, **kwargs):
         if not isinstance(document_type, basestring):
             if not issubclass(document_type, (Document, basestring)):
                 raise ValidationError('Argument to ReferenceField constructor '
                                       'must be a document class or a string')
         self.document_type_obj = document_type
+        self.reverse_delete_rule = reverse_delete_rule
         super(ReferenceField, self).__init__(**kwargs)
 
     @property

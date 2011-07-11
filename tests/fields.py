@@ -523,29 +523,29 @@ class FieldTest(unittest.TestCase):
         Link.drop_collection()
         Post.drop_collection()
         Bookmark.drop_collection()
-    
+
         link_1 = Link(title="Pitchfork")
         link_1.save()
-    
+
         post_1 = Post(title="Behind the Scenes of the Pavement Reunion")
         post_1.save()
-        
+
         bm = Bookmark(bookmark_object=post_1)
         bm.save()
-        
+
         bm = Bookmark.objects(bookmark_object=post_1).first()
-        
+
         self.assertEqual(bm.bookmark_object, post_1)
         self.assertTrue(isinstance(bm.bookmark_object, Post))
-        
+
         bm.bookmark_object = link_1
         bm.save()
-        
+
         bm = Bookmark.objects(bookmark_object=link_1).first()
-        
+
         self.assertEqual(bm.bookmark_object, link_1)
         self.assertTrue(isinstance(bm.bookmark_object, Link))
-    
+
         Link.drop_collection()
         Post.drop_collection()
         Bookmark.drop_collection()
@@ -555,23 +555,23 @@ class FieldTest(unittest.TestCase):
         """
         class Link(Document):
             title = StringField()
-    
+
         class Post(Document):
             title = StringField()
-    
+
         class User(Document):
             bookmarks = ListField(GenericReferenceField())
-    
+
         Link.drop_collection()
         Post.drop_collection()
         User.drop_collection()
-    
+
         link_1 = Link(title="Pitchfork")
         link_1.save()
-    
+
         post_1 = Post(title="Behind the Scenes of the Pavement Reunion")
         post_1.save()
-    
+
         user = User(bookmarks=[post_1, link_1])
         user.save()
         
@@ -644,7 +644,8 @@ class FieldTest(unittest.TestCase):
         """Ensure that value is in a container of allowed values.
         """
         class Shirt(Document):
-            size = StringField(max_length=3, choices=('S','M','L','XL','XXL'))
+            size = StringField(max_length=3, choices=(('S', 'Small'), ('M', 'Medium'), ('L', 'Large'),
+                                                      ('XL', 'Extra Large'), ('XXL', 'Extra Extra Large')))
 
         Shirt.drop_collection()
 
