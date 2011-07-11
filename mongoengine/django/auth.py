@@ -32,6 +32,12 @@ class User(Document):
     last_login = DateTimeField(default=datetime.datetime.now)
     date_joined = DateTimeField(default=datetime.datetime.now)
 
+    meta = {
+        'indexes': [
+            {'fields': ['username'], 'unique': True}
+        ]
+    }
+
     def __unicode__(self):
         return self.username
 
@@ -98,6 +104,10 @@ class User(Document):
 class MongoEngineBackend(object):
     """Authenticate using MongoEngine and mongoengine.django.auth.User.
     """
+
+    supports_object_permissions = False
+    supports_anonymous_user = False
+    supports_inactive_user = False
 
     def authenticate(self, username=None, password=None):
         user = User.objects(username=username).first()
